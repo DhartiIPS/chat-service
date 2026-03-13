@@ -14,3 +14,8 @@ export class TypingDto {
   @IsBoolean()
   isTyping: boolean;
 }
+
+export class RegisterUserDto {
+  @IsString()
+  userId: string;
+}
