@@ -7,34 +7,19 @@ import { PaginateMessagesDto } from './dto/paginate-messages.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { ChatService } from './chat.service';
 
-/**
- * Microservice controller — handles TCP/Redis patterns from the API gateway.
- * NestJS only registers the *last* @MessagePattern when multiple decorators
- * are stacked on the same method, so each pattern gets its own handler.
- */
 @Controller('chat')
 export class ChatController {
   constructor(private readonly chatService: ChatService) {}
-
-  // ─── Send ─────────────────────────────────────────────────────────────────
 
   @MessagePattern({ cmd: 'send_message' })
   async handleSendMessage(@Payload() payload: SendMessageDto) {
     return this.chatService.sendMessage(payload);
   }
 
-  // Legacy alias kept for backward compatibility.
   @MessagePattern({ cmd: 'message' })
   async handleSendMessageAlias(@Payload() payload: SendMessageDto) {
     return this.chatService.sendMessage(payload);
   }
-
-  // ─── Fetch ────────────────────────────────────────────────────────────────
-
-  /**
-   * Fetch a paginated direct-message conversation between two users.
-   * Returns { items: Chat[], nextCursor: string | null }.
-   */
   @MessagePattern({ cmd: 'get_direct_messages' })
   async getDirectMessages(
     @Payload()
@@ -84,8 +69,6 @@ export class ChatController {
     );
   }
 
-  // ─── Edit / Delete ────────────────────────────────────────────────────────
-
   @MessagePattern({ cmd: 'edit_message' })
   async editMessage(
     @Payload()
@@ -111,8 +94,6 @@ export class ChatController {
     );
     return { ok: true };
   }
-
-  // ─── Read receipts ────────────────────────────────────────────────────────
 
   @MessagePattern({ cmd: 'mark_messages_read' })
   async markRead(

@@ -55,8 +55,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly chatAuthService: ChatAuthService,
   ) {}
 
-  // ─── Lifecycle ────────────────────────────────────────────────────────────
-
   async handleConnection(client: Socket): Promise<void> {
     try {
       const user = await this.chatAuthService.validateSocket(client);
@@ -80,8 +78,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.server.emit('presence_offline', { userId: user.sub });
     }
   }
-
-  // ─── Room management ──────────────────────────────────────────────────────
 
   @SubscribeMessage('join_room')
   async joinRoom(
@@ -117,16 +113,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return { ok: true };
   }
 
-  // ─── Messaging ────────────────────────────────────────────────────────────
-
-  /**
-   * Send a message.
-   * - Room message  → emits `message_created` to the room Socket.IO room.
-   * - Direct message → emits `message_created` to sender's AND receiver's
-   *   personal rooms (each user auto-joins their own userId room on connect).
-   *   This guarantees delivery even if the receiver never explicitly joined
-   *   the conversationId room.
-   */
   @SubscribeMessage('message')
   @Roles('user', 'admin')
   async sendMessage(
@@ -212,8 +198,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return { ok: true };
   }
 
-  // ─── Typing indicator ─────────────────────────────────────────────────────
-
   @SubscribeMessage('typing')
   @Roles('user', 'admin')
   async typing(
@@ -233,7 +217,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         isTyping: dto.isTyping,
       });
     } else if (dto.receiverId) {
-      // Send only to the receiver's personal room (exclude self).
       this.server.to(dto.receiverId).emit('typing', {
         senderId: user.sub,
         receiverId: dto.receiverId,
@@ -243,8 +226,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     return { ok: true };
   }
-
-  // ─── Read receipts ────────────────────────────────────────────────────────
 
   @SubscribeMessage('mark_read')
   @Roles('user', 'admin')
@@ -265,10 +246,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
     return { ok: true, updatedCount };
   }
-
-  // ─── Fetch history ────────────────────────────────────────────────────────
-
-  /** Paginate messages in a group room (requires membership). */
   @SubscribeMessage('get_messages')
   @Roles('user', 'admin')
   async getMessages(
@@ -284,10 +261,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
   }
 
-  /**
-   * Paginate a direct-message conversation between the authenticated user
-   * and `receiverId`.  No room membership required.
-   */
   @SubscribeMessage('get_direct_messages')
   @Roles('user', 'admin')
   async getDirectMessages(
@@ -302,8 +275,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       dto.limit ?? 20,
     );
   }
-
-  // ─── Helpers ──────────────────────────────────────────────────────────────
 
   private bumpPresence(userId: string, delta: number): number {
     const current = this.presenceCounter.get(userId) ?? 0;
