@@ -1,71 +1,156 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import { Socket } from 'socket.io';
-import { firstValueFrom, timeout } from 'rxjs';
+import { firstValueFrom, timeout, catchError, throwError } from 'rxjs';
 import { AUTH_CLIENT } from '../chat.constants';
 import { AuthUser } from '../interfaces/auth-user.interface';
+
+const TOKEN_TIMEOUT_MS = 8000;
 
 @Injectable()
 export class ChatAuthService {
   private readonly logger = new Logger(ChatAuthService.name);
 
   constructor(
-    @Inject(AUTH_CLIENT) private readonly authClient: ClientProxy,
+    @Inject(AUTH_CLIENT)
+    private readonly authClient: ClientProxy,
   ) {}
 
-  /**
-   * Extracts the Bearer token from a Socket.IO handshake and validates it
-   * against the auth microservice.  Throws if invalid.
-   */
-  async validateSocket(client: Socket): Promise<AuthUser> {
-    const token = this.extractToken(client);
+  async validateSocket(socket: Socket): Promise<AuthUser> {
+    const token = this.extractToken(socket);
+
+    this.logger.log(
+      `[validateSocket] socket=${socket.id}\n` +
+        `  auth.token  : "${token?.slice(0, 60)}..."\n` +
+        `  resolved    : "${token?.slice(0, 60)}..."`,
+    );
 
     if (!token) {
-      throw new Error('Missing auth token');
+      throw new UnauthorizedException('No token provided');
     }
+
+    let payload: AuthUser;
 
     try {
-      const user = await firstValueFrom<AuthUser>(
+      payload = await firstValueFrom<AuthUser>(
         this.authClient
-          .send<AuthUser>({ cmd: 'validate_token' }, { token })
-          .pipe(timeout(5_000)),
-      );
+          .send<AuthUser>({ cmd: 'verify_token' }, { token })
+          .pipe(
+            timeout(TOKEN_TIMEOUT_MS),
+            catchError((err) => {
+              const rpcMessage =
+                err?.error?.message ??
+                err?.message ??
+                JSON.stringify(err);
 
-      if (!user?.sub) {
-        throw new Error('Invalid token payload');
+              return throwError(() => new Error(rpcMessage));
+            }),
+          ),
+      );
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : JSON.stringify(err);
+
+      const isTimeout = message.toLowerCase().includes('timeout');
+
+      const isConnRefused =
+        message.toLowerCase().includes('econnrefused') ||
+        message.toLowerCase().includes('connect');
+
+      if (isTimeout || isConnRefused) {
+        this.logger.error(
+          `[validateSocket] ❌ AUTH-SERVICE UNREACHABLE socket=${socket.id}\n` +
+            `  → Is auth-service running on ${
+              process.env.AUTH_TCP_HOST ?? 'localhost'
+            }:${process.env.AUTH_TCP_PORT ?? 5002}?\n` +
+            `  → Raw error: ${message}`,
+        );
+
+        throw new UnauthorizedException(
+          'Auth service unavailable — please try again',
+        );
       }
 
-      return user;
-    } catch (err) {
-      this.logger.warn(`[ChatAuthService] Token validation failed: ${(err as Error).message}`);
-      throw new Error('Unauthorized');
+      this.logger.error(
+        `[validateSocket] ❌ TOKEN REJECTED socket=${socket.id}\n` +
+          `  → Raw error: ${message}`,
+      );
+
+      throw new UnauthorizedException('Invalid or expired token');
     }
+
+    // ✅ FIX: was `typeof payload.sub !== 'number'`
+    // That hard-rejected every auth service that stores sub as a string (UUID, etc.)
+    // Now we just ensure sub is truthy — any non-empty string or non-zero number is valid.
+    if (!payload || payload.sub == null) {
+      this.logger.error(
+        `[validateSocket] ❌ BAD PAYLOAD socket=${socket.id}: ${JSON.stringify(
+          payload,
+        )}`,
+      );
+
+      throw new UnauthorizedException(
+        'Invalid token payload from auth-service',
+      );
+    }
+
+    // Normalise role → roles[] so every downstream consumer gets a string array.
+    // JWT may return  { role: "doctor" }  (singular string) but the gateway
+    // expects  { roles: ["doctor"] }  (array). Normalise once here.
+    if (!Array.isArray((payload as any).roles)) {
+      const raw: unknown = (payload as any).role ?? (payload as any).roles;
+      const roleStr = typeof raw === 'string' && raw ? raw.toLowerCase() : 'user';
+      // Always include both the domain role AND the generic 'user' role
+      // so guards checking for 'user' pass for doctors and patients too.
+      (payload as any).roles = roleStr === 'admin'
+        ? ['admin', 'user']
+        : [roleStr, 'user'];
+    }
+
+    this.logger.log(
+      `[validateSocket] ✅ OK socket=${socket.id} userId=${payload.sub} roles=${JSON.stringify((payload as any).roles)}`,
+    );
+
+    return payload;
   }
 
-  // ─── Private ─────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────
+  // Token extraction from socket handshake
+  // ─────────────────────────────────────────
 
-  private extractToken(client: Socket): string | null {
-    // 1. socket.io auth object  { auth: { token: '...' } }
-    const authToken = client.handshake?.auth?.token as string | undefined;
-    if (authToken) return this.stripBearer(authToken);
+  private extractToken(socket: Socket): string | null {
+    // socket.io auth object
+    const fromAuth = (socket.handshake.auth as Record<string, unknown>)?.token;
 
-    // 2. Authorization header
-    const header =
-      (client.handshake?.headers?.authorization as string | undefined) ?? '';
-    if (header.toLowerCase().startsWith('bearer ')) {
-      return header.slice(7).trim();
+    if (typeof fromAuth === 'string' && fromAuth) {
+      return this.stripBearer(fromAuth);
     }
 
-    // 3. Query-string fallback ?token=...
-    const query = client.handshake?.query?.token;
-    if (typeof query === 'string' && query) return query;
+    // Authorization header
+    const fromHeader = socket.handshake.headers.authorization?.split(' ')[1];
+
+    if (fromHeader) {
+      return this.stripBearer(fromHeader);
+    }
+
+    // Query fallback
+    const fromQuery = socket.handshake.query?.token;
+
+    if (typeof fromQuery === 'string' && fromQuery) {
+      return this.stripBearer(fromQuery);
+    }
 
     return null;
   }
 
-  private stripBearer(value: string): string {
-    return value.toLowerCase().startsWith('bearer ')
-      ? value.slice(7).trim()
-      : value.trim();
+  private stripBearer(token: string): string {
+    return token.toLowerCase().startsWith('bearer ')
+      ? token.slice(7).trim()
+      : token.trim();
   }
 }

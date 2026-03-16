@@ -16,7 +16,6 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { ChatAuthService } from './auth/chat-auth.service';
-import { Roles } from './decorators/roles.decorator';
 import { DeleteMessageDto } from './dto/delete-message.dto';
 import { EditMessageDto } from './dto/edit-message.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
@@ -27,7 +26,6 @@ import { SendMessageDto } from './dto/send-message.dto';
 import { TypingDto } from './dto/typing.dto';
 import { WsExceptionFilter } from './filters/ws-exception.filter';
 import { WsJwtAuthGuard } from './guards/ws-jwt-auth.guard';
-import { WsRolesGuard } from './guards/ws-roles.guard';
 import { AuthUser } from './interfaces/auth-user.interface';
 import { ChatService } from './chat.service';
 
@@ -36,7 +34,7 @@ import { ChatService } from './chat.service';
   cors: { origin: true, credentials: true },
 })
 @UseFilters(WsExceptionFilter)
-@UseGuards(WsJwtAuthGuard, WsRolesGuard)
+@UseGuards(WsJwtAuthGuard)
 @UsePipes(
   new ValidationPipe({
     whitelist: true,
@@ -61,8 +59,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.data.user = user;
       // Each user joins a private room named after their own userId so DMs
       // can be delivered by emitting to recipient.sub without extra join/leave.
-      await client.join(user.sub);
-      this.bumpPresence(user.sub, 1);
+      await client.join(String(user.sub));
+      this.bumpPresence(String(user.sub), 1);
       this.server.emit('presence_online', { userId: user.sub });
     } catch {
       client.disconnect(true);
@@ -73,7 +71,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const user = client.data.user as AuthUser | undefined;
     if (!user) return;
 
-    const count = this.bumpPresence(user.sub, -1);
+    const count = this.bumpPresence(String(user.sub), -1);
     if (count === 0) {
       this.server.emit('presence_offline', { userId: user.sub });
     }
@@ -85,8 +83,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() dto: JoinRoomDto,
   ) {
     const user = client.data.user as AuthUser;
-    const role = this.toRoomRole(user.roles);
-    await this.chatService.joinRoom(dto.roomId, user.sub, role);
+    const userRoles: string[] = Array.isArray(user.roles) ? user.roles : [String(user.role ?? 'user')];
+    const role = this.toRoomRole(userRoles);
+    await this.chatService.joinRoom(dto.roomId, String(user.sub), role);
     await client.join(dto.roomId);
 
     this.server.to(dto.roomId).emit('room_user_joined', {
@@ -104,7 +103,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() dto: LeaveRoomDto,
   ) {
     const user = client.data.user as AuthUser;
-    await this.chatService.leaveRoom(dto.roomId, user.sub);
+    await this.chatService.leaveRoom(dto.roomId, String(user.sub));
     await client.leave(dto.roomId);
     this.server.to(dto.roomId).emit('room_user_left', {
       roomId: dto.roomId,
@@ -114,13 +113,17 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('message')
-  @Roles('user', 'admin')
   async sendMessage(
     @ConnectedSocket() client: Socket,
     @MessageBody() dto: SendMessageDto,
   ) {
     const user = client.data.user as AuthUser;
-    if (dto.senderId !== user.sub) {
+
+    // ✅ FIX: was `dto.senderId !== user.sub`
+    // user.sub may be a number (e.g. 42) while dto.senderId is always a string ("42").
+    // Strict !== will always be true for number vs string, blocking every single message.
+    // Normalise both sides to string before comparing.
+    if (dto.senderId !== String(user.sub)) {
       throw new WsException('senderId must match authenticated user');
     }
 
@@ -133,8 +136,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // Direct message — deliver to both participants via their personal rooms.
       // Using `server.to()` chaining so a single emit reaches both sockets.
       this.server
-        .to(created.senderId)
-        .to(created.receiverId)
+        .to(String(created.senderId))
+        .to(String(created.receiverId))
         .emit('message_created', created);
     }
 
@@ -142,25 +145,25 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('edit_message')
-  @Roles('user', 'admin')
   async editMessage(
     @ConnectedSocket() client: Socket,
     @MessageBody() dto: EditMessageDto,
   ) {
     const user = client.data.user as AuthUser;
+    const roles: string[] = Array.isArray(user.roles) ? user.roles : [String(user.role ?? 'user')];
     const updated = await this.chatService.editMessage(
       dto.messageId,
-      user.sub,
+      String(user.sub),
       dto.message,
-      user.roles.includes('admin'),
+      roles.includes('admin'),
     );
 
     if (updated.roomId) {
       this.server.to(updated.roomId).emit('message_updated', updated);
     } else if (updated.receiverId) {
       this.server
-        .to(updated.senderId)
-        .to(updated.receiverId)
+        .to(String(updated.senderId))
+        .to(String(updated.receiverId))
         .emit('message_updated', updated);
     }
 
@@ -168,16 +171,16 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('delete_message')
-  @Roles('user', 'admin')
   async deleteMessage(
     @ConnectedSocket() client: Socket,
     @MessageBody() dto: DeleteMessageDto,
   ) {
     const user = client.data.user as AuthUser;
+    const delRoles: string[] = Array.isArray(user.roles) ? user.roles : [String(user.role ?? 'user')];
     const deleted = await this.chatService.deleteMessage(
       dto.messageId,
-      user.sub,
-      user.roles.includes('admin'),
+      String(user.sub),
+      delRoles.includes('admin'),
     );
 
     // Notify room or both DM participants.
@@ -187,8 +190,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         .emit('message_deleted', { messageId: dto.messageId });
     } else if (deleted?.receiverId) {
       this.server
-        .to(deleted.senderId)
-        .to(deleted.receiverId)
+        .to(String(deleted.senderId))
+        .to(String(deleted.receiverId))
         .emit('message_deleted', { messageId: dto.messageId });
     } else {
       // Fallback — broadcast (matches old behaviour for unknown targets).
@@ -199,7 +202,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('typing')
-  @Roles('user', 'admin')
   async typing(
     @ConnectedSocket() client: Socket,
     @MessageBody() dto: TypingDto,
@@ -228,7 +230,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('mark_read')
-  @Roles('user', 'admin')
   async markRead(
     @ConnectedSocket() client: Socket,
     @MessageBody() dto: MarkReadDto,
@@ -236,7 +237,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const user = client.data.user as AuthUser;
     const updatedCount = await this.chatService.markAsRead(
       dto.roomId,
-      user.sub,
+      String(user.sub),
       dto.lastMessageId,
     );
     this.server.to(dto.roomId).emit('messages_read', {
@@ -246,8 +247,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
     return { ok: true, updatedCount };
   }
+
   @SubscribeMessage('get_messages')
-  @Roles('user', 'admin')
   async getMessages(
     @ConnectedSocket() client: Socket,
     @MessageBody() dto: PaginateMessagesDto,
@@ -255,21 +256,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const user = client.data.user as AuthUser;
     return this.chatService.getMessagesByRoom(
       dto.roomId,
-      user.sub,
+      String(user.sub),
       dto.cursor,
       dto.limit ?? 20,
     );
   }
 
   @SubscribeMessage('get_direct_messages')
-  @Roles('user', 'admin')
   async getDirectMessages(
     @ConnectedSocket() client: Socket,
     @MessageBody() dto: { receiverId: string; cursor?: string; limit?: number },
   ) {
     const user = client.data.user as AuthUser;
     return this.chatService.getMessages(
-      user.sub,
+      String(user.sub),
       dto.receiverId,
       dto.cursor,
       dto.limit ?? 20,

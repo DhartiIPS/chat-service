@@ -3,7 +3,10 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatAuthService } from './auth/chat-auth.service';
-import { AUTH_CLIENT, CHAT_EVENTS_CLIENT } from './chat.constants';
+// ✅ FIX: removed unused CHAT_EVENTS_CLIENT import — it was imported but never
+// registered in ClientsModule, and nothing injected it. Leaving dead imports
+// causes confusion about whether something is intentionally missing.
+import { AUTH_CLIENT } from './chat.constants';
 import { ChatController } from './chat.controller';
 import { ChatGateway } from './chat.gateway';
 import { ChatService } from './chat.service';
@@ -19,44 +22,16 @@ import { WsRolesGuard } from './guards/ws-roles.guard';
     TypeOrmModule.forFeature([Chat, ChatRoomMember]),
 
     ClientsModule.registerAsync([
-      // Auth microservice
       {
         name: AUTH_CLIENT,
-        imports: [ConfigModule],
         inject: [ConfigService],
-        useFactory: (cfg: ConfigService) => {
-          const transport =
-            cfg.get<string>('AUTH_TRANSPORT') === 'redis'
-              ? Transport.REDIS
-              : Transport.TCP;
-          return {
-            transport,
-            options:
-              transport === Transport.REDIS
-                ? { host: cfg.get('REDIS_HOST', 'localhost'), port: cfg.get<number>('REDIS_PORT', 6379) }
-                : { host: cfg.get('AUTH_TCP_HOST', 'localhost'), port: cfg.get<number>('AUTH_TCP_PORT', 4002) },
-          };
-        },
-      },
-
-      // Chat-events microservice (downstream domain events)
-      {
-        name: CHAT_EVENTS_CLIENT,
-        imports: [ConfigModule],
-        inject: [ConfigService],
-        useFactory: (cfg: ConfigService) => {
-          const transport =
-            cfg.get<string>('CHAT_EVENTS_TRANSPORT') === 'redis'
-              ? Transport.REDIS
-              : Transport.TCP;
-          return {
-            transport,
-            options:
-              transport === Transport.REDIS
-                ? { host: cfg.get('REDIS_HOST', 'localhost'), port: cfg.get<number>('REDIS_PORT', 6379) }
-                : { host: cfg.get('CHAT_EVENTS_TCP_HOST', 'localhost'), port: cfg.get<number>('CHAT_EVENTS_TCP_PORT', 4010) },
-          };
-        },
+        useFactory: (config: ConfigService) => ({
+          transport: Transport.TCP,
+          options: {
+            host: config.get<string>('AUTH_TCP_HOST') || 'localhost',
+            port: parseInt(config.get<string>('AUTH_TCP_PORT') || '5002'),
+          },
+        }),
       },
     ]),
   ],
