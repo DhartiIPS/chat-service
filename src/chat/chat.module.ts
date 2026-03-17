@@ -3,9 +3,6 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatAuthService } from './auth/chat-auth.service';
-// ✅ FIX: removed unused CHAT_EVENTS_CLIENT import — it was imported but never
-// registered in ClientsModule, and nothing injected it. Leaving dead imports
-// causes confusion about whether something is intentionally missing.
 import { AUTH_CLIENT } from './chat.constants';
 import { ChatController } from './chat.controller';
 import { ChatGateway } from './chat.gateway';

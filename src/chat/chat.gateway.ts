@@ -57,11 +57,25 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     try {
       const user = await this.chatAuthService.validateSocket(client);
       client.data.user = user;
-      // Each user joins a private room named after their own userId so DMs
-      // can be delivered by emitting to recipient.sub without extra join/leave.
       await client.join(String(user.sub));
       this.bumpPresence(String(user.sub), 1);
       this.server.emit('presence_online', { userId: user.sub });
+      const delivered = await this.chatService.markAsDelivered(String(user.sub));
+      if (delivered.length > 0) {
+        // Group message IDs by senderId so each sender gets one batched event.
+        const bySender = new Map<string, string[]>();
+        for (const { id, senderId } of delivered) {
+          const ids = bySender.get(senderId) ?? [];
+          ids.push(id);
+          bySender.set(senderId, ids);
+        }
+        for (const [senderId, messageIds] of bySender) {
+          this.server.to(senderId).emit('message_status_updated', {
+            messageIds,
+            status: 'delivered',
+          });
+        }
+      }
     } catch {
       client.disconnect(true);
     }
@@ -118,11 +132,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() dto: SendMessageDto,
   ) {
     const user = client.data.user as AuthUser;
-
-    // ✅ FIX: was `dto.senderId !== user.sub`
-    // user.sub may be a number (e.g. 42) while dto.senderId is always a string ("42").
-    // Strict !== will always be true for number vs string, blocking every single message.
-    // Normalise both sides to string before comparing.
     if (dto.senderId !== String(user.sub)) {
       throw new WsException('senderId must match authenticated user');
     }
@@ -274,6 +283,29 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       dto.cursor,
       dto.limit ?? 20,
     );
+  }
+  @SubscribeMessage('mark_direct_read')
+  async markDirectRead(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() dto: { senderId: string },
+  ) {
+    const user   = client.data.user as AuthUser;
+    const reader = String(user.sub);
+
+    const updatedCount = await this.chatService.markAsReadDirect(
+      dto.senderId,  // the person whose messages we are reading
+      reader,        // us — the recipient marking them as read
+    );
+
+    if (updatedCount > 0) {
+      this.server.to(dto.senderId).emit('direct_messages_read', {
+        senderId: dto.senderId,
+        readerId: reader,
+        status:   'read',
+      });
+    }
+
+    return { ok: true, updatedCount };
   }
 
   private bumpPresence(userId: string, delta: number): number {

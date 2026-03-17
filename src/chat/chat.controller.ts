@@ -6,6 +6,7 @@ import { MarkReadDto } from './dto/mark-read.dto';
 import { PaginateMessagesDto } from './dto/paginate-messages.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { ChatService } from './chat.service';
+import { MarkDeliveredDto } from './dto/mark-delivered.dto';
 
 @Controller('chat')
 export class ChatController {
@@ -119,5 +120,14 @@ export class ChatController {
       payload.lastMessageId,
     );
     return { ok: true, updatedCount };
+  }
+  @MessagePattern({ cmd: 'mark_messages_delivered' })
+  async markDelivered(@Payload() payload: MarkDeliveredDto) {
+    const delivered = await this.chatService.markAsDelivered(
+      payload.recipientId,
+      payload.senderId,
+    );
+    const updatedIds = delivered.map((d) => d.id);
+    return { ok: true, updatedCount: updatedIds.length, updatedIds };
   }
 }

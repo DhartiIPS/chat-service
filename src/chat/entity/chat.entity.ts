@@ -7,6 +7,7 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
+import { MessageStatus } from '../enum/message-status.enum';
 
 @Entity('chat_messages')
 @Index(['conversationId', 'createdAt'])
@@ -43,6 +44,14 @@ export class Chat {
 
   @Column({ nullable: true, type: 'timestamptz' })
   readAt: Date | null;
+  
+  @Column({
+    type: 'enum',
+    enum: MessageStatus,
+    default: MessageStatus.SENT,
+  })
+  @Index()
+  status: MessageStatus;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

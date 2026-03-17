@@ -84,9 +84,7 @@ export class ChatAuthService {
       throw new UnauthorizedException('Invalid or expired token');
     }
 
-    // ✅ FIX: was `typeof payload.sub !== 'number'`
-    // That hard-rejected every auth service that stores sub as a string (UUID, etc.)
-    // Now we just ensure sub is truthy — any non-empty string or non-zero number is valid.
+    
     if (!payload || payload.sub == null) {
       this.logger.error(
         `[validateSocket] ❌ BAD PAYLOAD socket=${socket.id}: ${JSON.stringify(
@@ -98,30 +96,20 @@ export class ChatAuthService {
         'Invalid token payload from auth-service',
       );
     }
-
-    // Normalise role → roles[] so every downstream consumer gets a string array.
-    // JWT may return  { role: "doctor" }  (singular string) but the gateway
-    // expects  { roles: ["doctor"] }  (array). Normalise once here.
     if (!Array.isArray((payload as any).roles)) {
       const raw: unknown = (payload as any).role ?? (payload as any).roles;
       const roleStr = typeof raw === 'string' && raw ? raw.toLowerCase() : 'user';
-      // Always include both the domain role AND the generic 'user' role
-      // so guards checking for 'user' pass for doctors and patients too.
       (payload as any).roles = roleStr === 'admin'
         ? ['admin', 'user']
         : [roleStr, 'user'];
     }
 
     this.logger.log(
-      `[validateSocket] ✅ OK socket=${socket.id} userId=${payload.sub} roles=${JSON.stringify((payload as any).roles)}`,
+      `[validateSocket]   OK socket=${socket.id} userId=${payload.sub} roles=${JSON.stringify((payload as any).roles)}`,
     );
 
     return payload;
   }
-
-  // ─────────────────────────────────────────
-  // Token extraction from socket handshake
-  // ─────────────────────────────────────────
 
   private extractToken(socket: Socket): string | null {
     // socket.io auth object
