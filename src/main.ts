@@ -1,20 +1,25 @@
 import { NestFactory } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
 import { Transport } from '@nestjs/microservices';
-import * as dotenv from 'dotenv';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  dotenv.config();
 
-  const app = await NestFactory.createMicroservice(AppModule, {
+  const app = await NestFactory.create(AppModule);
+
+  const config = app.get(ConfigService);
+
+  app.connectMicroservice({
     transport: Transport.TCP,
     options: {
-      host: '0.0.0.0',
-      port: 4001,
+      host: config.get('CHAT_TCP_HOST', '0.0.0.0'),
+      port: config.get('CHAT_TCP_PORT', 4002),
     },
   });
 
-  await app.listen();
-  console.log('Chat Microservice running on TCP :4001');
+  await app.startAllMicroservices();
+
+  await app.listen(config.get('CHAT_HTTP_PORT', 5009));
+
 }
 bootstrap();

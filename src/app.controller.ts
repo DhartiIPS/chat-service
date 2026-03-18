@@ -10,7 +10,7 @@ export class AppController {
 
   @Post('message')
   async messages(@Body() dto: SendMessageDto) {
-    await this.pusherService.sendMessage(dto); // ✅ use sendMessage
+    await this.pusherService.sendMessage(dto); //  use sendMessage
     return { success: true };
   }
 
