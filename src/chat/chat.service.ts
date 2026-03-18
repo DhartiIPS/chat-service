@@ -25,7 +25,7 @@ export class ChatService {
   async joinRoom(
     roomId: string,
     userId: string,
-    role: 'admin' | 'user' = 'user',
+    role: 'admin' | 'user' | 'doctor' | 'patient' = 'user',
   ): Promise<ChatRoomMember> {
     const existing = await this.memberRepository.findOne({
       where: { roomId, userId },

@@ -26,7 +26,7 @@ import { WsRolesGuard } from './guards/ws-roles.guard';
           transport: Transport.TCP,
           options: {
             host: config.get<string>('AUTH_TCP_HOST') || 'localhost',
-            port: parseInt(config.get<string>('AUTH_TCP_PORT') || '5002'),
+            port: parseInt(config.get<string>('AUTH_TCP_PORT') || '4002'),
           },
         }),
       },

@@ -23,7 +23,7 @@ export class ChatRoomMember {
 
   /** Role within this specific room. */
   @Column({ type: 'varchar', default: 'user' })
-  role: 'admin' | 'user';
+  role: 'admin' | 'user' | 'doctor' | 'patient';
 
   /** Null means the member is currently active in the room. */
   @Column({ nullable: true, type: 'timestamptz' })
