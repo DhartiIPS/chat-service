@@ -31,25 +31,7 @@ import { ChatService } from './chat.service';
 
 @WebSocketGateway({
   namespace: '/chat',
-  // ✅ FIX 1: explicitly declare transports — required for ngrok polling to work
-  transports: ['polling', 'websocket'],
-  cors: {
-    origin: [
-      'http://localhost:3000',
-      'http://127.0.0.1:3000',
-      'https://frontend-snowy-six-67.vercel.app',
-      /\.ngrok-free\.app$/,
-      /\.ngrok\.io$/,
-    ],
-    credentials: true,
-    methods: ['GET', 'POST'],
-    // ✅ FIX 2: allow ngrok browser-warning bypass header
-    allowedHeaders: [
-      'Content-Type',
-      'Authorization',
-      'ngrok-skip-browser-warning',
-    ],
-  },
+  cors: { origin: true, credentials: true },
 })
 @UseFilters(WsExceptionFilter)
 @UseGuards(WsJwtAuthGuard)
@@ -64,56 +46,23 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
-  /**
-   * Tracks every active socket ID per user.
-   * A user is considered online as long as this Set is non-empty.
-   * Replaces the old single-slot `onlineUsers` map and the separate
-   * `presenceCounter` — the Set size IS the counter.
-   *
-   *   userId  →  Set<socketId>
-   */
-  private readonly userSockets = new Map<string, Set<string>>();
+  private readonly presenceCounter = new Map<string, number>();
 
   constructor(
     private readonly chatService: ChatService,
     private readonly chatAuthService: ChatAuthService,
   ) {}
 
-  // ─── Lifecycle ────────────────────────────────────────────────────────────
-
   async handleConnection(client: Socket): Promise<void> {
     try {
       const user = await this.chatAuthService.validateSocket(client);
       client.data.user = user;
-      const userId = String(user.sub);
-
-      await client.join(userId);
-
-      // Register this socket in the user's active-socket set.
-      const sockets = this.userSockets.get(userId) ?? new Set<string>();
-      const wasOffline = sockets.size === 0;
-
-      // ── Initial presence sync ───────────────────────────────────────────
-      // Send the newly connected client the full list of users already online
-      // BEFORE adding ourselves, so they can seed their onlineUsers state.
-      // Without this, any user who connects after others will never know those
-      // users are online (they already missed the presence_online broadcasts).
-      const alreadyOnline = Array.from(this.userSockets.keys()).filter(
-        (id) => id !== userId,
-      );
-      client.emit('presence_sync', { onlineUserIds: alreadyOnline });
-
-      sockets.add(client.id);
-      this.userSockets.set(userId, sockets);
-
-      // Announce to everyone that this user came online (first socket only).
-      if (wasOffline) {
-        this.server.emit('presence_online', { userId });
-      }
-
-      // Mark any pending messages as delivered and notify their senders.
-      const delivered = await this.chatService.markAsDelivered(userId);
+      await client.join(String(user.sub));
+      this.bumpPresence(String(user.sub), 1);
+      this.server.emit('presence_online', { userId: user.sub });
+      const delivered = await this.chatService.markAsDelivered(String(user.sub));
       if (delivered.length > 0) {
+        // Group message IDs by senderId so each sender gets one batched event.
         const bySender = new Map<string, string[]>();
         for (const { id, senderId } of delivered) {
           const ids = bySender.get(senderId) ?? [];
@@ -133,27 +82,14 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   handleDisconnect(client: Socket): void {
-    // `client.data.user` is set during handleConnection; if auth failed the
-    // socket was immediately disconnected so there is nothing to clean up.
-    const userId = client.data?.user?.sub
-      ? String(client.data.user.sub)
-      : null;
+    const user = client.data.user as AuthUser | undefined;
+    if (!user) return;
 
-    if (!userId) return;
-
-    const sockets = this.userSockets.get(userId);
-    if (!sockets) return;
-
-    sockets.delete(client.id);
-
-    // Only announce offline when the very last socket disconnects.
-    if (sockets.size === 0) {
-      this.userSockets.delete(userId);
-      this.server.emit('user_offline', { userId });
+    const count = this.bumpPresence(String(user.sub), -1);
+    if (count === 0) {
+      this.server.emit('presence_offline', { userId: user.sub });
     }
   }
-
-  // ─── Room events ──────────────────────────────────────────────────────────
 
   @SubscribeMessage('join_room')
   async joinRoom(
@@ -161,9 +97,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() dto: JoinRoomDto,
   ) {
     const user = client.data.user as AuthUser;
-    const userRoles: string[] = Array.isArray(user.roles)
-      ? user.roles
-      : [String(user.role ?? 'user')];
+    const userRoles: string[] = Array.isArray(user.roles) ? user.roles : [String(user.role ?? 'user')];
     const role = this.toRoomRole(userRoles);
     await this.chatService.joinRoom(dto.roomId, String(user.sub), role);
     await client.join(dto.roomId);
@@ -192,8 +126,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return { ok: true };
   }
 
-  // ─── Message events ───────────────────────────────────────────────────────
-
   @SubscribeMessage('message')
   async sendMessage(
     @ConnectedSocket() client: Socket,
@@ -207,8 +139,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const created = await this.chatService.sendMessage(dto);
 
     if (created.roomId) {
+      // Group / room message — broadcast to everyone in the room.
       this.server.to(created.roomId).emit('message_created', created);
     } else if (created.receiverId) {
+      // Direct message — deliver to both participants via their personal rooms.
+      // Using `server.to()` chaining so a single emit reaches both sockets.
       this.server
         .to(String(created.senderId))
         .to(String(created.receiverId))
@@ -224,9 +159,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() dto: EditMessageDto,
   ) {
     const user = client.data.user as AuthUser;
-    const roles: string[] = Array.isArray(user.roles)
-      ? user.roles
-      : [String(user.role ?? 'user')];
+    const roles: string[] = Array.isArray(user.roles) ? user.roles : [String(user.role ?? 'user')];
     const updated = await this.chatService.editMessage(
       dto.messageId,
       String(user.sub),
@@ -252,15 +185,14 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() dto: DeleteMessageDto,
   ) {
     const user = client.data.user as AuthUser;
-    const delRoles: string[] = Array.isArray(user.roles)
-      ? user.roles
-      : [String(user.role ?? 'user')];
+    const delRoles: string[] = Array.isArray(user.roles) ? user.roles : [String(user.role ?? 'user')];
     const deleted = await this.chatService.deleteMessage(
       dto.messageId,
       String(user.sub),
       delRoles.includes('admin'),
     );
 
+    // Notify room or both DM participants.
     if (deleted?.roomId) {
       this.server
         .to(deleted.roomId)
@@ -271,13 +203,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         .to(String(deleted.receiverId))
         .emit('message_deleted', { messageId: dto.messageId });
     } else {
+      // Fallback — broadcast (matches old behaviour for unknown targets).
       this.server.emit('message_deleted', { messageId: dto.messageId });
     }
 
     return { ok: true };
   }
-
-  // ─── Typing ───────────────────────────────────────────────────────────────
 
   @SubscribeMessage('typing')
   async typing(
@@ -290,6 +221,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     if (dto.roomId) {
+      // Broadcast to everyone else in the room.
       client.to(dto.roomId).emit('typing', {
         roomId: dto.roomId,
         userId: user.sub,
@@ -305,8 +237,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     return { ok: true };
   }
-
-  // ─── Read receipts ────────────────────────────────────────────────────────
 
   @SubscribeMessage('mark_read')
   async markRead(
@@ -326,32 +256,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
     return { ok: true, updatedCount };
   }
-
-  @SubscribeMessage('mark_direct_read')
-  async markDirectRead(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() dto: { senderId: string },
-  ) {
-    const user = client.data.user as AuthUser;
-    const reader = String(user.sub);
-
-    const updatedCount = await this.chatService.markAsReadDirect(
-      dto.senderId,
-      reader,
-    );
-
-    if (updatedCount > 0) {
-      this.server.to(dto.senderId).emit('direct_messages_read', {
-        senderId: dto.senderId,
-        readerId: reader,
-        status: 'read',
-      });
-    }
-
-    return { ok: true, updatedCount };
-  }
-
-  // ─── Pagination ───────────────────────────────────────────────────────────
 
   @SubscribeMessage('get_messages')
   async getMessages(
@@ -380,16 +284,38 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       dto.limit ?? 20,
     );
   }
+  @SubscribeMessage('mark_direct_read')
+  async markDirectRead(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() dto: { senderId: string },
+  ) {
+    const user   = client.data.user as AuthUser;
+    const reader = String(user.sub);
 
-  // ─── Helpers ──────────────────────────────────────────────────────────────
+    const updatedCount = await this.chatService.markAsReadDirect(
+      dto.senderId,  // the person whose messages we are reading
+      reader,        // us — the recipient marking them as read
+    );
 
-  private toRoomRole(roles: string[]): 'admin' | 'user' | 'doctor' | 'patient' {
-    return roles.includes('admin')
-      ? 'admin'
-      : roles.includes('doctor')
-      ? 'doctor'
-      : roles.includes('patient')
-      ? 'patient'
-      : 'user';
+    if (updatedCount > 0) {
+      this.server.to(dto.senderId).emit('direct_messages_read', {
+        senderId: dto.senderId,
+        readerId: reader,
+        status:   'read',
+      });
+    }
+
+    return { ok: true, updatedCount };
+  }
+
+  private bumpPresence(userId: string, delta: number): number {
+    const current = this.presenceCounter.get(userId) ?? 0;
+    const next = Math.max(0, current + delta);
+    this.presenceCounter.set(userId, next);
+    return next;
+  }
+
+  private toRoomRole(roles: string[]): 'admin' | 'user' {
+    return roles.includes('admin') ? 'admin' : 'user';
   }
 }
