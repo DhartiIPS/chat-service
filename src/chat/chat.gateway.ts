@@ -31,7 +31,7 @@ import { ChatService } from './chat.service';
 
 @WebSocketGateway({
   namespace: '/chat',
-  cors: { origin: true, credentials: true },
+  cors: { origin: '*', credentials: true },
 })
 @UseFilters(WsExceptionFilter)
 @UseGuards(WsJwtAuthGuard)

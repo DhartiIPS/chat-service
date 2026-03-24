@@ -8,6 +8,13 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   const config = app.get(ConfigService);
+  app.enableCors({
+    origin: [
+      'https://frontend-eight-beryl-k9n74eselr.vercel.app',
+      'http://localhost:3000',
+    ],
+    credentials: true,
+  });
 
   app.connectMicroservice({
     transport: Transport.TCP,
